@@ -1,0 +1,55 @@
+name: Development workflow
+run-name: Development workflow
+on: [push]
+
+jobs:
+  unit-tests:
+    runs-on: self-hosted
+    container:
+      image: python:3.12-rc-bullseye
+    steps:
+    - name: Check out repository code
+      uses: actions/checkout@v3
+    - name: Install pip requirements
+      run: |
+        pip install -r requirements.txt
+    - name: Run unit tests
+      run: |
+        python3 -m pytest -v
+  image-build:
+    runs-on: self-hosted
+    needs: [unit-tests]
+    steps:
+    - name: Set up QEMU
+      uses: docker/setup-qemu-action@v2
+    - name: Set up Docker Buildx
+      uses: docker/setup-buildx-action@v2
+    - name: Login to Docker Hub
+      uses: docker/login-action@v2
+      with:
+        username: ${{ secrets.DOCKERHUB_USERNAME }}
+        password: ${{ secrets.DOCKERHUB_TOKEN }}
+    - name: Build and push
+      uses: docker/build-push-action@v4
+      with:
+        push: true
+        tags: ${{ secrets.DOCKERHUB_USERNAME }}/flask-ping-server:latest
+  deploy-to-dev:
+    runs-on: self-hosted
+    needs: [image-build]
+    container:
+      image: ubuntu:22.04
+    steps:
+    - name: Install dependencies
+      run: |
+        apt-get update && apt-get install -y wget
+        wget -qO "/usr/local/bin/kubectl" https://dl.k8s.io/release/v1.27.3/bin/linux/amd64/kubectl
+        chmod +x "/usr/local/bin/kubectl"
+        kubectl config set-cluster kind-actions-kind --server=https://172.17.0.1:6443/ --insecure-skip-tls-verify=true
+        kubectl config set-credentials actions-dev --token="${{ secrets.ACTIONS_DEV_TOKEN }}"
+        kubectl config set-context actions-dev --user=actions-dev --cluster=kind-actions-kind --namespace=dev
+        kubectl config use-context actions-dev
+    - name: Deploy to dev namespace
+      run: |
+        kubectl create deploy flask-ping-server --image=${{ secrets.DOCKERHUB_USERNAME }}/flask-ping-server:latest --replicas=2 --port=5000 --dry-run=client -o yaml > flask-ping-server.yaml
+        kubectl replace --force -f flask-ping-server.yaml
